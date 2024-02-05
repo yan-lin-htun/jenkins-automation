@@ -1,0 +1,133 @@
+pipeline {
+    agent any 
+    environment {
+    //GITLAB
+    DOCKER_REGISTRY_PROJECT = "GITLAB-Registry"
+    PROJECT_REPO_URL = "Repo-URL"
+    BRANCH_CODE = "Branch-Name"
+    GITLAB_CREDENTIAL = "GitLab-Credentials"
+    DOCKER_REGISTRY_CREDENTIAL = "GitLab-Credentials"
+    //
+    dir = "/tmp/ams-backend-prod-v${env.BUILD_ID}-Jenkins-tmp"    
+
+    //----------------------------------K8S Deployment Name-----------------------------------------
+
+    K8S_DEPLOYMENT = "deployment-name"
+    K8S_CONTAINER = "container-name"
+    K8S_NAMESPACE = "namespace-name"
+
+
+    //---------------------------------------------------------------------------------------
+
+    DOCKER_FILE = "DOCKER-FILE-AMS-BACKEND"
+    PATH_DOCKER_FILE = "v1/Dockerfile"
+    
+    ENV_FILE = "AMS-BACKEND-ENV"
+    PATH_ENV_FILE = "v1/.env"
+
+    }
+
+    stages {
+        stage('Checkout: Code') {
+                agent any
+                steps {
+                    ws(env.dir) {
+                        git credentialsId: env.GITLAB_CREDENTIAL,
+                        branch: env.BRANCH_CODE,
+                        url: env.PROJECT_REPO_URL
+                        script {
+                             echo "delete .env folder"
+                             sh "rm v1/.env"
+                             echo "${env.dir}"
+                            commit=sh 'git rev-parse --verify HEAD'
+                            echo "commit hash ${env.commit}"
+                        }
+                    }
+                }
+        }
+        
+    stage('Get: Secret/Config file') {
+            agent any 
+            steps{
+            ws("${env.dir}") {
+                    withCredentials([file(credentialsId: env.ENV_FILE, variable: 'ENV_FILE')]) {
+                        echo "Create ENV file into v1/.env"
+                        sh "cat $ENV_FILE > ${env.PATH_ENV_FILE}"
+                    }
+                    withCredentials([file(credentialsId: env.DOCKER_FILE, variable: 'DOCKER_FILE')]) {
+                        echo "Create DOCKER_FILE file"
+                        sh "cat $DOCKER_FILE > ${env.PATH_DOCKER_FILE}"
+                    }
+                
+                script {
+                    echo "build ID ${env.BUILD_ID}"
+                }
+                }
+            }
+    }
+    
+
+        stage('Build and Push image') {
+        agent any
+        
+        steps{
+            ws("${env.dir}") {
+            script {
+            // sh "cat .npmrc"
+            GIT_COMMIT_HASH = sh (
+                script: 'git rev-parse --verify HEAD',
+                returnStdout: true
+            ).trim()
+            // echo "Git committer hash: ${GIT_COMMIT_HASH}"
+            IMAGE_NAME="${env.DOCKER_REGISTRY_PROJECT}"+":"+"${GIT_COMMIT_HASH}"
+            echo "check registry ${env.DOCKER_REGISTRY_PROJECT}"
+            echo "get commit hash ${GIT_COMMIT_HASH}"
+            echo "get image name to build ${IMAGE_NAME}"
+            withDockerRegistry(credentialsId: env.DOCKER_REGISTRY_CREDENTIAL, url: 'https://registry.gitlab.com') {
+               
+                sh "cd v1 && docker build -t ${IMAGE_NAME} ."
+                sh "docker push ${IMAGE_NAME}"
+                sh "docker rmi ${IMAGE_NAME}"   
+            }
+            }
+            }
+        }
+        }
+        
+        stage('CD: Deploy to k8s') {
+            agent {
+                docker { 
+                    image 'lucj/kubectl:latest' 
+                    args '--privileged -u root'
+                }
+            }
+            
+            steps {
+                script{
+                        withVault(configuration: [timeout: 60, vaultCredentialId: 'Vault-prod', vaultUrl: 'vault-url'], vaultSecrets: [[path: 'secrets-path', secretValues: [[vaultKey: 'AMS_K8S_CREDENTIAL'], [vaultKey: 'AMS_K8S_TOKEN'], [vaultKey: 'AMS_K8S_URL']]]]) {
+    
+                            sh"""
+                                echo "Create file script to replace value"
+                                echo "${AMS_K8S_CREDENTIAL} > kube.ca.pem"
+                                echo "Set up K8S cluster config"  
+                                kubectl config set-cluster cluster-name --server=${AMS_K8S_URL} --certificate-authority='kube.ca.pem'           
+                                kubectl config set-credentials k8s-username --token=${AMS_K8S_TOKEN}
+                                kubectl config set-context context-name --cluster=cluster-name --user=k8s-username --namespace ${env.K8S_NAMESPACE}
+                                kubectl config use-context context-name
+                                echo "get current status"
+                                echo "change image to new image ${IMAGE_NAME}"
+                                kubectl get all --insecure-skip-tls-verify
+                                kubectl --insecure-skip-tls-verify set image deployment/${env.K8S_DEPLOYMENT} ${env.K8S_CONTAINER}=${IMAGE_NAME} -n ${env.K8S_NAMESPACE}
+                                kubectl --insecure-skip-tls-verify rollout status deployment/${env.K8S_DEPLOYMENT} -n ${env.K8S_NAMESPACE}
+                                kubectl get all --insecure-skip-tls-verify                          
+                            """
+                }
+            }
+        }
+
+    }
+
+}
+}
+
+    
