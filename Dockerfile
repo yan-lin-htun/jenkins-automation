@@ -1,6 +1,6 @@
 FROM node:version
 
-ENV NODE_ENV=ENV Name (Dev or Prod)
+ENV NODE_ENV=ENV Name  #(development or production)
 
 WORKDIR /app
 
@@ -14,6 +14,6 @@ RUN yarn build
 
 EXPOSE 1337
 
-CMD ["yarn", "develop"]  #if dev env
+CMD ["yarn", "develop"]  #if development env
 
-CMD ["yarn", "start" ]  #if prod env
+CMD ["yarn", "start" ]  #if production env
